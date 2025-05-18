@@ -50,18 +50,26 @@ class DQNModel(nn.Module):
             return out
 
 class RewardNet(nn.Module):
-    def __init__(self, state_size, action_size):
+    def __init__(self, state_size, action_size, goal_delta_size):
         super(RewardNet, self).__init__()
-        self.fc1 = nn.Linear(state_size + action_size + state_size, 128)
+        input_size = state_size + action_size + goal_delta_size  # state + action_onehot + state_delta
+        self.fc1 = nn.Linear(input_size, 128)
+        self.norm1 = nn.LayerNorm(128)
+        self.drop1 = nn.Dropout(0.2)
+        
         self.fc2 = nn.Linear(128, 64)
+        self.norm2 = nn.LayerNorm(64)
+        self.drop2 = nn.Dropout(0.2)
+        
         self.fc3 = nn.Linear(64, 1)
 
     def forward(self, state, action_onehot, state_delta):
         x = torch.cat((state, action_onehot, state_delta), dim=1)
-        x = torch.relu(self.fc1(x))
-        x = torch.relu(self.fc2(x))
-        # return torch.sigmoid(self.fc3(x))  # 0~1 보상 예측용
-        return self.fc3(x)  # ⛔ sigmoid 제거!
+        x = self.drop1(F.relu(self.norm1(self.fc1(x))))
+        x = self.drop2(F.relu(self.norm2(self.fc2(x))))
+        out = self.fc3(x)
+        return out  # 선형 출력 유지
+
 
 
 class StatePredictionNet(nn.Module):
@@ -102,15 +110,17 @@ class StatePredictionNet(nn.Module):
 #         return epsilon
         
 class DQNAgent:
-    def __init__(self, state_size, action_size, gamma=0.99, lr=0.0003):
+    def __init__(self, state_size, action_size, gamma=0.99, lr=0.0003,goal_indices=[5,6,7]):
         self.state_size = state_size
         self.action_size = action_size
-        self.memory = deque(maxlen=10000)
+        self.memory = deque(maxlen=100000)
         self.gamma = gamma
+        self.goal_indices = goal_indices  # 여기서 저장
+        goal_delta_size = len(goal_indices)
 
         self.model = DQNModel(state_size, action_size)
         self.target_model = DQNModel(state_size, action_size)
-        self.reward_model = RewardNet(state_size, action_size)
+        self.reward_model = RewardNet(state_size, action_size, goal_delta_size)
         self.prediction_model = StatePredictionNet(state_size, action_size)
 
         self.update_target_model()
@@ -124,8 +134,8 @@ class DQNAgent:
         self.prediction_model.to(self.device)
 
         self.optimizer = optim.Adam(self.model.parameters(), lr=lr)
-        # self.reward_optimizer = optim.Adam(self.reward_model.parameters(), lr=lr)
-        # self.prediction_optimizer = optim.Adam(self.prediction_model.parameters(), lr=lr)
+        self.reward_optimizer = optim.Adam(self.reward_model.parameters(), lr=lr)
+        self.prediction_optimizer = optim.Adam(self.prediction_model.parameters(), lr=lr)
         
         self.criterion = nn.MSELoss()
         self.contrastive_criterion = nn.L1Loss()
@@ -133,6 +143,7 @@ class DQNAgent:
         # self.exploration_rewarder = StateExplorationReward()
         self.last_reward = None
         # self.replay_index = 0  # 반복 위치를 저장할 변수
+        self.last_logged_index = 0  # 로그 저장 위치 초기화
         self.q_valuefordp = 0
         self.epsilon = 1.0
         self.epsilon_min = 0
@@ -149,32 +160,25 @@ class DQNAgent:
 
         self.recent_actions = deque(maxlen=10)  # 최근 행동 기록
         self.epsilon_boost = 0.8         # 복구시 epsilon 증가량
-        self.nstep_buffer = deque(maxlen=10)  # N=5, 추적할 최대 길이
+        self.nstep_buffer = deque(maxlen=50)  # N=5, 추적할 최대 길이
         self.lambda_decay = 0.9              # λ 값
 
         
-    # def is_action_available(self, action, state_tensor):
-    #     """
-    #     기본 행동 유효성 검사 함수
-    #     예: 스킬 개수와 상태에 따른 행동 제한
-    #     """
-    #     skill_state_index = 5
-    #     if action <= 4:  # 기본적인 행동들: 이동, 점프, 공격 등
-    #         return True
-    #     skillget_estimated = int(state_tensor[0][skill_state_index].item())  # 상태 내 인덱스에서 추출
-    #     # 스킬 개수에 따른 행동 제한
-    #     if action == 5 and skillget_estimated >= 1:
-    #         return True
-    #     elif action == 6 and skillget_estimated >= 2:
-    #         return True
-    #     elif action == 7 and skillget_estimated >= 3:
-    #         return True
-    #     elif action == 8 and skillget_estimated >= 4:
-    #         return True
-    #     elif action == 9 and skillget_estimated >= 5:
-    #         return True
-        
-    #     return False  # 그 외에는 유효하지 않음
+    def update_schedules(self):
+        # 학습 진행도 = 1 - epsilon (0.0 ~ 1.0)
+        progress = 1.0 - self.epsilon
+
+        # 🔹 ε 스케줄링 (piecewise linear)
+        if self.epsilon > 0.8:
+            self.epsilon -= 0.0000005
+        elif self.epsilon > 0.6:
+            self.epsilon -= 0.0000003
+        elif self.epsilon > self.epsilon_min:
+            self.epsilon -= 0.0000001
+        self.epsilon = max(self.epsilon, self.epsilon_min)
+
+        # 🔹 λ 스케줄링: 0.95 → 0.55 로 천천히 감소
+        self.lambda_decay = max(0.55, 0.99 - progress * 0.4)
 
     def update_target_model(self):
         self.target_model.load_state_dict(self.model.state_dict())
@@ -318,17 +322,18 @@ class DQNAgent:
     def remember(self, state, action, reward, next_state, done):
         state = np.array(state, dtype=np.float32).flatten()
         next_state = np.array(next_state, dtype=np.float32).flatten()
-        # state_delta = np.array(next_state) - np.array(state)
-        # state_delta = next_state - state  # 상태 변화량 계산
-        # transition = (state, action, reward, next_state, done, state_delta)
-        transition = (state, action, reward, next_state, done)
-        self.memory.append(transition)
         
-        # self.nstep_buffer.append(transition)
+        goal_delta = next_state[self.goal_indices] - state[self.goal_indices]
+        
+        # transition = (state, action, reward, next_state, done, state_delta)
+        transition = (state, action, reward, next_state, done, goal_delta)
+        # self.memory.append(transition)
+        
+        self.nstep_buffer.append(transition)
 
-        # # N개가 쌓이면 trajectory를 memory에 저장
-        # if len(self.nstep_buffer) == self.nstep_buffer.maxlen:
-        #     self.memory.append(list(self.nstep_buffer))
+        # N개가 쌓이면 trajectory를 memory에 저장
+        if len(self.nstep_buffer) == self.nstep_buffer.maxlen:
+            self.memory.append(list(self.nstep_buffer))
 
 
     def replay(self, batch_size=50):
@@ -336,44 +341,35 @@ class DQNAgent:
             return
         
         minibatch = random.sample(self.memory, batch_size)
-        batch = np.array(minibatch, dtype=object)
+        # batch = np.array(minibatch, dtype=object)
 
         # 🔹 [1] RewardNet, PredictionNet, Contrastive 학습은 기존 방식 유지
         # flat_batch = [t for traj in minibatch for t in traj]  # trajectory 내 transition 평탄화
         # batch = np.array(flat_batch, dtype=object)
         
 
-        states = torch.tensor(np.stack(batch[:, 0].tolist()), dtype=torch.float32).to(self.device)
-        actions = torch.tensor(np.stack(batch[:, 1].tolist()), dtype=torch.long).unsqueeze(1).to(self.device)
+        # states = torch.tensor(np.stack(batch[:, 0].tolist()), dtype=torch.float32).to(self.device)
+        # actions = torch.tensor(np.stack(batch[:, 1].tolist()), dtype=torch.long).unsqueeze(1).to(self.device)
         # onehot_actions = torch.nn.functional.one_hot(actions.squeeze(), num_classes=self.action_size).float().to(self.device)
-        rewards = torch.tensor(np.stack(batch[:, 2].tolist()), dtype=torch.float32).unsqueeze(1).to(self.device)
-        next_states = torch.tensor(np.stack(batch[:, 3].tolist()), dtype=torch.float32).to(self.device)
-        dones = torch.tensor(np.stack(batch[:, 4].tolist()), dtype=torch.float32).unsqueeze(1).to(self.device)
+        # rewards = torch.tensor(np.stack(batch[:, 2].tolist()), dtype=torch.float32).unsqueeze(1).to(self.device)
+        # next_states = torch.tensor(np.stack(batch[:, 3].tolist()), dtype=torch.float32).to(self.device)
+        # dones = torch.tensor(np.stack(batch[:, 4].tolist()), dtype=torch.float32).unsqueeze(1).to(self.device)
         # state_deltas = torch.tensor(np.stack(batch[:, 5].tolist()), dtype=torch.float32).to(self.device)
 
         
         # 현재 Q값
-        q_values = self.model(states).gather(1, actions)
+        # q_values = self.model(states).gather(1, actions)
 
-        # 타겟 Q값
-        with torch.no_grad():
-            max_next_q_values = self.target_model(next_states).max(1, keepdim=True)[0]
-            target_q_values = rewards + (1 - dones) * self.gamma * max_next_q_values
+        # # 타겟 Q값
+        # with torch.no_grad():
+        #     max_next_q_values = self.target_model(next_states).max(1, keepdim=True)[0]
+        #     target_q_values = rewards + (1 - dones) * self.gamma * max_next_q_values
             
-        # 손실 계산 및 업데이트
-        loss = self.criterion(q_values, target_q_values)
-        self.optimizer.zero_grad()
-        loss.backward()
-        self.optimizer.step()
-
-        # # 1. RewardNet 학습
-        # predicted_rewards = self.reward_model(states, onehot_actions, state_deltas)
-        # reward_loss = self.criterion(predicted_rewards, rewards)
-
-
-        # # 2. StatePredictionNet 학습
-        # predicted_next_states = self.prediction_model(states, onehot_actions)
-        # prediction_loss = self.criterion(predicted_next_states, next_states)
+        # # 손실 계산 및 업데이트
+        # loss = self.criterion(q_values, target_q_values)
+        # self.optimizer.zero_grad()
+        # loss.backward()
+        # self.optimizer.step()
 
         # # 3. Contrastive 학습: 보상이 없는 transition은 학습 weight를 낮춤
         # with torch.no_grad():
@@ -395,55 +391,67 @@ class DQNAgent:
         # self.prediction_optimizer.step()
 
         # # 🔹 [2] TD(λ) 기반 Q-network 학습
-        # lambda_decay = self.lambda_decay  # 예: 0.9
+        lambda_decay = self.lambda_decay  # 예: 0.9
+        gamma = self.gamma
+        criterion = self.criterion
 
-        # for trajectory in minibatch:  # trajectory = N-step list of transitions
-        #     cumulative_td = 0.0
+        for trajectory in minibatch:
+            cumulative_td_target = 0.0
+            weight_sum = 0.0
 
-        #     for i, (s, a, r, s_next, done, _) in enumerate(trajectory):
-        #         state_tensor = torch.tensor(s, dtype=torch.float32).unsqueeze(0).to(self.device)
-        #         next_state_tensor = torch.tensor(s_next, dtype=torch.float32).unsqueeze(0).to(self.device)
-        #         action_tensor = torch.tensor([[a]]).to(self.device)
+        # trajectory는 (state, action, reward, next_state, done)의 리스트
 
-                # # 현재 Q값
-                # q_val = self.model(state_tensor).gather(1, action_tensor)
-                
-                # # 타겟 Q값
-                # with torch.no_grad():
-                #     target_q = self.target_model(next_state_tensor).max(1, keepdim=True)[0]
-                #     td_target = torch.tensor([[r]], device=self.device) + (1 - done) * self.gamma * target_q
-                
-                # td_error = td_target - q_val
-                # weight = (lambda_decay ** i)
-                # cumulative_td += weight * td_error.item()
-                # if done:
-                #     break
+        for i, (s, a, r, s_next, done, goal_delta) in enumerate(trajectory):
+            # TD 계산에 필요한 텐서 변환
+            state_tensor = torch.tensor(s, dtype=torch.float32).unsqueeze(0).to(self.device)
+            next_state_tensor = torch.tensor(s_next, dtype=torch.float32).unsqueeze(0).to(self.device)
+            # action_tensor = torch.tensor([[a]]).to(self.device)
 
+            # q_val = self.model(state_tensor).gather(1, action_tensor)
+            with torch.no_grad():
+                max_next_q = self.target_model(next_state_tensor).max(1, keepdim=True)[0]
+                td_target = torch.tensor([[r]], device=self.device) + (1 - done) * gamma * max_next_q
+
+            weight = (lambda_decay ** i)
+            cumulative_td_target += weight * td_target
+            weight_sum += weight
+
+            # RewardNet과 PredictionNet 학습은 transition 단위로 별도 진행
+            # 1) RewardNet 학습
+            onehot_action = torch.nn.functional.one_hot(torch.tensor([a]), num_classes=self.action_size).float().to(self.device)
+            goal_delta_tensor = torch.tensor(np.array(goal_delta, dtype=np.float32)).unsqueeze(0).to(self.device)
+            predicted_reward = self.reward_model(state_tensor, onehot_action, goal_delta_tensor)
+            reward_loss = criterion(predicted_reward, torch.tensor([[r]], dtype=torch.float32).to(self.device))
+
+            self.reward_optimizer.zero_grad()
+            reward_loss.backward()
+            self.reward_optimizer.step()
+
+            # 2) PredictionNet 학습
+            predicted_next_state = self.prediction_model(state_tensor, onehot_action)
+            prediction_loss = criterion(predicted_next_state, next_state_tensor)
+
+            self.prediction_optimizer.zero_grad()
+            prediction_loss.backward()
+            self.prediction_optimizer.step()
+
+            if done:
+                break
+
+        # TD(λ) 업데이트 - 첫 transition만 사용
+        s0, a0, _, _, _, _ = trajectory[0]
+        s0_tensor = torch.tensor(s0, dtype=torch.float32).unsqueeze(0).to(self.device)
+        a0_tensor = torch.tensor([[a0]]).to(self.device)
+        q0_val = self.model(s0_tensor).gather(1, a0_tensor)
+
+        avg_td_target = cumulative_td_target / weight_sum
+        loss = criterion(q0_val, avg_td_target)
+
+        self.optimizer.zero_grad()
+        loss.backward()
+        self.optimizer.step()
             
 
-            # trajectory의 첫 state-action만 업데이트 (가중 누적 TD-error 반영)
-            # 전체 trajectory에 대해 첫 transition을 사용
-            # s0, a0, r0, s1, done, _ = trajectory[0]
-            # s0_tensor = torch.tensor(s0, dtype=torch.float32).unsqueeze(0).to(self.device)
-            # a0_tensor = torch.tensor([[a0]]).to(self.device)
-
-            # with torch.no_grad():
-            #     max_q_next = self.target_model(torch.tensor(s1, dtype=torch.float32).unsqueeze(0).to(self.device)).max(1, keepdim=True)[0]
-            #     td_target = torch.tensor([[r0]], device=self.device) + (1 - done) * self.gamma * max_q_next
-
-            # q_val = self.model(s0_tensor).gather(1, a0_tensor)
-            # loss = self.criterion(q_val, td_target)
-
-            # # 보상 예측 확인
-            # print(f"[replay] predicted_reward.mean = {q_val0.mean().item():.4f}")
-            # print(f"[replay] loss = {loss.item():.4f}")
-            # print(f"[replay] contrastive_loss = {contrastive_loss.item():.4f}")
-            # print(f"[replay] prediction_loss = {prediction_loss.item():.4f}")
-
-            # self.optimizer.zero_grad()
-            # loss.backward()
-            # self.optimizer.step()
-            # print(f"[replay] Q-loss = {loss.item():.4f}")
 
         # #보상 변화에 따른 epsilon 증가
         # reward_mean = rewards.mean().item()
@@ -459,7 +467,7 @@ class DQNAgent:
         # Epsilon 감소      
         # cycle = 10000  
         # self.epsilon = max(self.epsilon_min, 0.5 * (1 + np.cos(2 * np.pi * (step % cycle) / cycle)))
-        self.epsilon = max(self.epsilon_min, self.epsilon - self.epsilon_decay)
+        # self.epsilon = max(self.epsilon_min, self.epsilon - self.epsilon_decay)
 
         # self.update_counter += 1
         # if self.update_counter % self.target_update_frequency == 0:
@@ -468,25 +476,29 @@ class DQNAgent:
     def log_rewardnet_outputs(self, log_path="rewardnet_log.npy", sample_size=200):
         if len(self.memory) < sample_size:
             return
-        
-        # 최근 trajectory 평탄화
+
+        # 최근 trajectory를 평탄화
         flat_batch = [t for traj in list(self.memory)[-sample_size:] for t in traj]
         batch = np.array(flat_batch, dtype=object)
 
         states = torch.tensor(np.stack(batch[:, 0].tolist()), dtype=torch.float32).to(self.device)
         actions = torch.tensor(np.stack(batch[:, 1].tolist()), dtype=torch.long).unsqueeze(1).to(self.device)
         onehot_actions = torch.nn.functional.one_hot(actions.squeeze(), num_classes=self.action_size).float().to(self.device)
-        state_deltas = torch.tensor(np.stack(batch[:, 5].tolist()), dtype=torch.float32).to(self.device)
+        
+        # goal_delta 추출
+        goal_deltas = torch.tensor(np.stack(batch[:, 5].tolist()), dtype=torch.float32).to(self.device)
 
         with torch.no_grad():
-            predicted_rewards = self.reward_model(states, onehot_actions, state_deltas).cpu().numpy()
+            predicted_rewards = self.reward_model(states, onehot_actions, goal_deltas).cpu().numpy()
 
+        # 안전한 저장: dict는 allow_pickle=True 필요
         np.save(log_path, {
             "states": states.cpu().numpy(),
             "actions": actions.cpu().numpy(),
-            "deltas": state_deltas.cpu().numpy(),
+            "deltas": goal_deltas.cpu().numpy(),
             "predicted_rewards": predicted_rewards
-    })
+        }, allow_pickle=True)
+
     
             
     def save(self, path):
@@ -497,9 +509,9 @@ class DQNAgent:
             'optimizer': self.optimizer.state_dict(),
             # 'reward_optimizer': self.reward_optimizer.state_dict(),
             # 'prediction_optimizer': self.prediction_optimizer.state_dict(),
-            'epsilon': self.epsilon
-            # 'memory': [list(traj) for traj in self.memory],  # trajectory 리스트 저장
-            # 'nstep_buffer': list(self.nstep_buffer),         # 현재 쌓인 n-step 버퍼도 저장
+            'epsilon': self.epsilon,
+            'memory': [list(traj) for traj in self.memory],  # trajectory 리스트 저장
+            'nstep_buffer': list(self.nstep_buffer),         # 현재 쌓인 n-step 버퍼도 저장
             # 'update_counter': self.update_counter
         }, path)
 
@@ -514,12 +526,12 @@ class DQNAgent:
         # self.prediction_optimizer.load_state_dict(checkpoint.get('prediction_optimizer', self.prediction_optimizer.state_dict()))
         self.epsilon = checkpoint.get('epsilon', self.epsilon)
 
-        # # ✅ memory와 nstep_buffer 복원
-        # if 'memory' in checkpoint:
-        #     self.memory = deque([list(t) for t in checkpoint['memory']], maxlen=8000)
+        # ✅ memory와 nstep_buffer 복원
+        if 'memory' in checkpoint:
+            self.memory = deque([list(t) for t in checkpoint['memory']], maxlen=8000)
 
-        # if 'nstep_buffer' in checkpoint:
-        #     self.nstep_buffer = deque([tuple(t) for t in checkpoint['nstep_buffer']], maxlen=self.nstep_buffer.maxlen)
+        if 'nstep_buffer' in checkpoint:
+            self.nstep_buffer = deque([tuple(t) for t in checkpoint['nstep_buffer']], maxlen=self.nstep_buffer.maxlen)
 
         # self.update_counter = checkpoint.get('update_counter', 0)
 

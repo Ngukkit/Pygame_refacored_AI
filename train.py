@@ -1,7 +1,7 @@
 from agent import DQNAgent
 from game_env import MyGameEnv
 import torch
-# import numpy as np
+import numpy as np
 import json
 import os
 import re
@@ -12,6 +12,19 @@ env = MyGameEnv(render_mode=True)
 state_size = len(env.observe_state())  # 상태 벡터 크기
 state = env.observe_state()
 action_size = 6  # 예시: 5가지 행동 (이동, 공격 등)
+goal_indices = []
+# 발판 위 여부 (4개)
+goal_indices += [10 + 5*i + 3 for i in range(4)]
+# 카운트다운
+goal_indices.append(30)
+# 몬스터 체력 (8마리)
+goal_indices += [31 + 8*i + 7 for i in range(5)]
+# 아이템 존재 여부 (5개)
+goal_indices += [71 + 4*i + 1 for i in range(5)]
+# 아이템 획득 여부 (5개)
+goal_indices += [71 + 4*i + 2 for i in range(5)]
+# 포탈 생성 및 충돌 상태 (2개)
+goal_indices += [91, 92]
 
 action_descriptions = {
     0: "<---",   # 예: '0'이면 '공격'을 수행
@@ -22,7 +35,7 @@ action_descriptions = {
     5: "use skill1",  # 예: '5'이면 '스킬4'를 수행
 }
 
-agent = DQNAgent(state_size, action_size)
+agent = DQNAgent(state_size, action_size,gamma=0.99, lr=0.0003, goal_indices=goal_indices)
 model_dir = "."
 
 model_files = [f for f in os.listdir(model_dir) if re.match(r"dqn_model(\d+).pth", f)]
@@ -42,7 +55,7 @@ else:
     print("모델 파일이 없어 새로 학습을 시작합니다.")
    
 # 에피소드 수
-episodes = 1000
+episodes = 3000
 start_epoch = latest_epoch if model_files else 0
 
 # device = torch.device("cpu")
@@ -64,7 +77,6 @@ for e in range(start_epoch,start_epoch + episodes):
     total_reward = 0
     step_count = 0
     reward = 0 
-    last_reward = 0  # 마지막 보상 초기화
     last_reward_step = 0  # 마지막 보상 스텝 초기화
         
     while not done:
@@ -83,47 +95,50 @@ for e in range(start_epoch,start_epoch + episodes):
             print(f"total steps: {step_count - last_reward_step} 스텝 epsilon UP ")
             # agent.epsilon = min(agent.epsilon + 0.005, 1)
             # print(f"postion : x{env.px} ,y{env.py}\n")
-            reward = -1
+            reward = -0.2
        
         if step_count - last_reward_step == 1500:
             print(f"보상 없이 1,500 스텝 초과, x{env.px} ,y{env.py}")
-            reward = -5
+            reward = -0.5
   
         if step_count - last_reward_step >= 3000:
             print(f"보상 없이 3,000 스텝 초과, 에피소드 강제 종료 x{env.px} ,y{env.py}")
-            reward = -10
+            reward = -1.0
             done = True
-            
-        if reward >= 5:
-            last_reward_step = step_count
+        
+        # if reward >= 0.05:
+        #     last_reward_step = step_count
             # agent.epsilon = max(agent.epsilon_min, agent.epsilon * 0.999) # 보상 받으면 탐험 감소
-        elif reward > 0:
+        if reward > 0:
             # print(f" reward: {reward}  x{env.px} ,y{env.py}")
             last_reward_step = step_count
             
-        state = next_state  # 상태 업데이트
         total_reward += reward
-        last_reward = reward  # 마지막 보상 업데이트
         
-        env.last_reward_timer(last_reward_step,MAXCOUNTDOWN=3000)  # 보상 타이머 설정
+        env.last_reward_timer(step_count-last_reward_step,MAXCOUNTDOWN=3000)  # 보상 타이머 설정
 
-          
-        agent.remember(state, action, reward, next_state, done)  # 경험 저장
-  
+        # 🔹 경험 저장     
+        agent.remember(state, action, reward, next_state, done) 
+        
+        # 경험 리플레이
         if len(agent.memory) >= 50 and step_count % 100 == 0:
-            agent.replay(batch_size=32)  # 경험 리플레이
-
-        if step_count % 300 == 0:
-            agent.update_target_model()  # 타겟 모델 업데이트
+            agent.replay(batch_size=50)  
         
-
-        # if np.random.rand() < 0.01:
-        #     agent.log_rewardnet_outputs("rewardnet_log.npy")
-      
+        # 🔹 타겟 모델 업데이트
+        if step_count % 300 == 0:
+            agent.update_target_model() 
+        
+        # 🔹 스케줄 갱신
+        agent.update_schedules()
+        
+        if total_reward < 0:
+            print("reward is Zero, episode end")
+            done = True
             
         if step_count % 50 == 0:
-            print(f"epsilon:{agent.epsilon:.4f},q_values:{agent.q_valuefordp:.4f},x{env.px:3.0f},y{env.py:3.0f},Reward:{total_reward:2d},Action:{action_description}")
+            print(f"epsilon:{agent.epsilon:.4f},q_values:{agent.q_valuefordp:.4f},x{env.px:3.0f},y{env.py:3.0f},lamda:{agent.lambda_decay:.2f},Reward:{total_reward:.3f},Action:{action_description}")
 
+        # 죽었을때 모델 저장
         if done:
             # agent.epsilon = min(agent.epsilon_max, agent.epsilon * 1.01)  # 또는 1.05 증가도 가능
             # agent.epsilon = min(agent.epsilon_max, 0.5) # 에피소드 종료 시 탐험 증가
@@ -135,12 +150,22 @@ for e in range(start_epoch,start_epoch + episodes):
             with open("q_values_log.json", "a") as f:
                 json.dump(q_log, f)
                 f.write("\n")
+                
+        state = next_state        
 
-    if (e + 1) % 10 == 0:
+    if (e + 1) % 10 == 0 and agent.epsilon > 0.9:
+        save_path = rf"dqn_model{e+1}.pth"
+        agent.save(save_path)
+        print(f"{save_path} 저장 완료.")
+    elif (e + 1) % 50 == 0 and 0.9 >= agent.epsilon > 0.7:
+        save_path = rf"dqn_model{e+1}.pth"
+        agent.save(save_path)
+        print(f"{save_path} 저장 완료.")
+    elif (e + 1) % 100 == 0 and 0.7 >= agent.epsilon:
         save_path = rf"dqn_model{e+1}.pth"
         agent.save(save_path)
         print(f"{save_path} 저장 완료.")
 
-    print(f"Episode {e+1}, Total Reward: {total_reward}")
+    print(f"Episode {e+1}, End Total Reward: {total_reward:.3f}")
 
 agent.save(r"dqn_model.pth")

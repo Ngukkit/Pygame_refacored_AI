@@ -16,24 +16,19 @@ class MyGameEnv(gym.Env):
         self.step_count = 0
         self.px = 0
         self.py = 0
-        self.prev_health = 0
+        self.SOME_X_THRESHOLD = 120
+        self.prev_monster_directions = [0] * 5
         self.lapclock = pygame.time.Clock()
         self.MAXCOUNTDOWN = 10000  # 또는 원하는 초기값
-        self.platform_touched = [0,0,0,0,0]
         # self.minimap_surface = pygame.Surface((40, 40))  # 확대 미니맵 Surface
         self.action_last_time = [0.0] * 10  # 각 액션별 마지막 실행 시각
-                # 각 액션에 대한 딜레이 (초 단위)
         self.action_delay_map = {
             0: 0.0,   # 왼쪽 이동
             1: 0.0,   # 오른쪽 이동
             2: 0.5,    # 점프
             3: 0.3,    # 공격
             4: 0.0,    # 대기 (즉시 허용)
-            5: 3.0,    # 스킬1
-            6: 3.0,    # 스킬2
-            7: 3.0,    # 스킬3
-            8: 3.0,    # 스킬4
-            9: 3.0     # 스킬5
+            5: 5.0     # 스킬1
         }
         game.init_game()
         game.init_assets()
@@ -41,10 +36,15 @@ class MyGameEnv(gym.Env):
     def reset(self):
         game.init_game()
         game.init_assets()
-        self.prev_dropswitch = game.dropswitch.copy()
+        self.itemget = False
+        self.last_shaping_reward = 0.0
+        self.platform_touched = [False for _ in range(len(game.platforms))]
         self.half_health_rewarded = True
         self.half_health_penalized = False  # 다시 감점 받을 수 있도록 초기화
-        self.platform_touched = [0,0,0,0,0]
+        self.prev_health = 0
+        self.prev_damage = 0
+        self.was_close = [False for _ in range(len(game.REDS))]
+        self.prev_monster_collision = [False for _ in range(len(game.REDS))]
 
         return self.observe_state()
 
@@ -68,9 +68,9 @@ class MyGameEnv(gym.Env):
 
         self.render()
         # next_state = self.last_minimap_state  # render()에서 생성된 state 사용
-
-        reward = self.calculate_reward()
+        
         state = self.observe_state()
+        reward = self.calculate_reward()
         return state, reward, done, {}
     
 
@@ -94,18 +94,26 @@ class MyGameEnv(gym.Env):
                 game.ihurt = True
                 game.yellow_health -= game.MYDMG
             else:
-                game.ihurt = False                
+                game.ihurt = False     
+                           
+        # 아이템 먹기
+        for i, irect in enumerate(game.ITEMrect):
+            if game.yellow.colliderect(irect) and game.dropswitch[i]:
+                game.get_item(i)
+                self.itemget = True
+                game.dropswitch[i] = False
                 
         if game.yellow_is_jumping:
             game.yellow.y += game.yellow_y_velocity
             game.yellow_y_velocity += game.GRAVITY
-            for plat in game.platforms:
+            for i,plat in enumerate(game.platforms):
                 if game.yellow_feet.colliderect(plat) and game.yellow.centerx >= plat.left <= plat.right and game.yellow_y_velocity > 0:
                     game.on_ground = True
+                    game.on_platform[i] = True
                     game.yellow_is_jumping = False
                     game.yellow.y = plat.top - game.yellow.height            
                              
-        if game.yellow.y >= game.GROUND_Y: #땅에 서있을떄 발판에 충돌하지 않을때
+        if game.yellow.y >= game.GROUND_Y:                              #땅에 서있을떄 발판에 충돌하지 않을때
             game.yellow.y = game.GROUND_Y                                       #내 위치에 땅의 위치 저장
             game.yellow_is_jumping = False                                 #점프중 스위치 OFF
             game.on_ground = True                                          #땅 스위치 ON
@@ -116,19 +124,13 @@ class MyGameEnv(gym.Env):
             game.yellow_y_velocity += game.GRAVITY                        #중력속도만큼 
             
 
-        # 아이템 먹기
-        for i, irect in enumerate(game.ITEMrect):
-            if game.yellow.colliderect(irect) and game.dropswitch[i]:
-                game.get_item(i)
-                self.itemget = True
-                game.dropswitch[i] = False
 
     def handle_action(self, action):
         current_time = time.time()
-        # delay = self.action_delay_map.get(action, 0.5)  # 기본값 0.5초
+        delay = self.action_delay_map.get(action, 0.0)  # 기본값 0.0초
 
-        # if current_time - self.action_last_time[action] < delay:
-        #     return  # 딜레이 미충족 → 무시
+        if current_time - self.action_last_time[action] < delay:
+            return  # 딜레이 미충족 → 무시
 
         self.action_last_time[action] = current_time  # 실행 시각 갱신
         """에이전트의 액션을 처리합니다."""
@@ -159,11 +161,18 @@ class MyGameEnv(gym.Env):
             game.rect_x = 820
 
 
-
-
     def calculate_reward(self):
         reward = 0
+
+        reward += self.last_shaping_reward
+        if not self.prev_damage:
+            self.prev_damage = self.raw_value
         
+        if self.prev_damage < self.raw_value :
+            reward += 0.1
+            print("damage up bonus")
+            self.prev_damage = self.raw_value
+        #체력
         if not hasattr(self, 'prev_health'):
             self.prev_health = game.yellow_health
         #체력 상태
@@ -175,23 +184,22 @@ class MyGameEnv(gym.Env):
         
         if game.yellow_health <= 0:
             print(f"dead")
-            reward -= 5
-        # elif game.yellow_health < self.prev_health:  
-        #     reward =- 1  
+            reward -= 1
+
         if game.yellow_health < game.Maxhealth / 2 and not self.half_health_penalized:
-            reward -= 5
+            reward -= 0.5
             print(f"half health 페널티")
             self.half_health_penalized = True
             self.half_health_rewarded = False  # 다시 보상 받을 수 있도록 초기화
-    # elif game.yellow_health > self.prev_health:
-    #     reward =+ 10
+
         if game.yellow_health >= game.Maxhealth / 2 and not self.half_health_rewarded:
-            reward += 5
+            reward += 0.5
             print(f"full health 복귀")
             self.half_health_rewarded = True
             self.half_health_penalized = False  # 다시 감점 받을 수 있도록 초기화
                 
         self.prev_health = game.yellow_health
+
             
         # 몬스터 처치 보상
         if not hasattr(self, 'prev_monswitch'):
@@ -200,49 +208,135 @@ class MyGameEnv(gym.Env):
         for i in range(len(game.REDS)):
             if self.prev_monswitch[i] and not game.monswitch[i]:
                 print(f"위치{i} 몬스터 처치 보상")
-                reward += 5
-
+                reward += {3: 0.6, 2: 0.8, 1: 1}.get(i, 0.5)
+            
+                
+                
         self.prev_monswitch = game.monswitch.copy()
         # 몬스터 피해 입힐시 보상
         if not hasattr(self, 'prev_monster_damage'):
             self.prev_monster_damage = [0] * len(game.REDS)
-        for i in range(len(game.REDS)):
-            if game.monster_healths[i] and game.monster_healths[i] < self.prev_monster_damage[i]:
-                reward += {3: 2, 2: 3, 1: 4}.get(i, 1)
-
+        for i,monster in enumerate(game.REDS):
+            if not game.monswitch[i]:
+                continue
+            elif game.monster_healths[i] and game.monster_healths[i] < self.prev_monster_damage[i]:
+                reward += {3: 0.04, 2: 0.06, 1: 0.08}.get(i, 0.02)
+                
             self.prev_monster_damage[i] = game.monster_healths[i]
+            
+            if self.prev_monster_directions[i] != game.monster_directions[i] and 3>i>0 and game.on_platform[i+2] == True:
+                if  i == 1:
+                    FRAMES_TO_COLLIDE = 20
+                elif  i == 2:
+                    FRAMES_TO_COLLIDE = 12
+
+                jump_top = game.yellow.top - 105# 머리 위치
+
+                # Y축 충돌 범위
+                y_threat = not (jump_top > monster.bottom)
+                
+                dx = monster.centerx - game.yellow.centerx
+                
+                approaching = (
+                    monster.centerx < game.yellow.centerx and game.monster_directions[i] == 1 or
+                    monster.centerx > game.yellow.centerx and game.monster_directions[i] == -1
+                    )
+                
+                max_jump_x_range = FRAMES_TO_COLLIDE + game.monster_speed
+                
+                x_threat =  approaching and abs(dx) <= max_jump_x_range
+                # 위험 조건 모두 만족 & 점프 안했을 때
+                if y_threat and x_threat and not game.yellow_is_jumping:
+                    print("위험 조건 모두 만족 & 점프 안했을 때")
+                    reward += 0.1  # 점프 안해서 위험을 회피함
+                    
+                self.prev_monster_directions[i] = game.monster_directions[i]
+                
+            collided = game.yellow.colliderect(monster)
+            # 충돌전에 피했을때 보너스    
+            dx = abs(monster.centerx - game.yellow.centerx)  # x축 거리만 사용
+            dy = abs(monster.centery - game.yellow.centery)
+               
+            if dx < 160 and dy< 20 and not collided:
+                self.was_close[i] = True  # 위협 상황 발생
+                
+            elif self.was_close[i] and dx > 200 and dy < 20:
+                reward += 0.1  # 회피 성공 보상
+                print("충돌전에 피했을때 보너스")
+                self.was_close[i] = False  # 보상은 1번만
+                
+            if collided and not self.prev_monster_collision[i]:
+                reward -= 0.1  # 페널티 부여
+                self.prev_monster_collision[i] = True
+                print(f"몬스터 {i}와 충돌, 페널티 적용")
+            elif not collided:
+                self.prev_monster_collision[i] = False
+            
+
+
+        # 점프 전에 거리 저장
+        if not hasattr(self, 'platform_dx_before_jump'):
+            self.platform_dx_before_jump = [None] * len(game.platforms)
 
         # 플랫폼에 1번 올라가면 보상
         for i,plat in enumerate(game.platforms):
-            if game.yellow_feet.colliderect(plat) and game.yellow.centerx >= plat.left <= plat.right and game.yellow_y_velocity and not self.platform_touched[i] and plat != game.platforms[0]:
+            if game.on_platform[i] and not self.platform_touched[i]:
                 self.platform_touched[i] = True
-                reward += {3: 15, 2: 20, 1: 20,0: 0}.get(i, 10) 
+                reward += {3: 0.60, 2: 0.80, 1: 0.8,0: 0.0}.get(i, 0.5) 
                 print(f"플랫폼에 {i}번 올라가면 보상")
+                game.on_platform[i] = False
+            else:
+                dx_left = abs(game.yellow.right - plat.left)
+                dx_right = abs(game.yellow.left - plat.right)
+                dy = plat.top - game.yellow.bottom
+                horizontal_reach = 150
+                vertical_reach = 105
+                distance_threshold = 60
+                if (min(dx_left, dx_right) <= horizontal_reach) and (0 < dy <= vertical_reach):
+                    # 점프 시작할 때, 거리 기록
+                    if game.yellow_is_jumping and self.platform_dx_before_jump[i] is None:
+                        self.platform_dx_before_jump[i] = abs(plat.centerx - game.yellow.centerx)
+
+                    # 점프 끝났을 때 거리 비교
+                    if not game.yellow_is_jumping and self.platform_dx_before_jump[i] is not None:
+                        dx_after = abs(plat.centerx - game.yellow.centerx)
+                        dx_before = self.platform_dx_before_jump[i]
+                        self.platform_dx_before_jump[i] = None
+
+                        # 플랫폼 끝 방향으로 점프하며 가까워질 때
+                        if dx_after < dx_before - distance_threshold:
+                            reward += 0.1
+                            print(f"플랫폼 {i}에 가까워지는 점프 보상")
+
 
         # 모든 몬스터 처치 시
         if game.alldeadsw:
             print("모든 몬스터 처치")
-            reward += 20
+            reward += 1
             
         if game.alldeadsw and game.BOSSPO == game.chgbg:
             print("보스 처치")
-            reward += 20
+            reward += 1
 
         # 아이템 수집 보상
+        if self.itemget:  # 아이템 수집 시
+            print("아이템 수집")
+            reward += 0.5
+            self.itemget = False
 
-        for i in range(len(game.ITEMrect)):
-            if game.yellow.colliderect(game.ITEMrect[i]) and game.dropswitch[i]:
-                print("아이템 수집")
-                reward += 5
-
+        # for i in range(len(game.ITEMrect)):
+        #     if game.yellow.colliderect(game.ITEMrect[i]) and game.dropswitch[i]:
+        #         print("아이템 수집")
+        #         reward += 5
 
         # 포탈 도달 보상
         if hasattr(self, 'portal_reached') and self.portal_reached:
-            reward += 10
+            reward += 0.5
             print("포탈 도달")
             self.portal_reached = False
             for i in range(len(game.platforms)):
                 self.platform_touched[i] = False
+                
         return reward
 
     def min_max_normalize(self, x, min_val=1000, max_val=70000):
@@ -254,19 +348,19 @@ class MyGameEnv(gym.Env):
         return self.step_count
 
     def observe_state(self):
-        raw_value = game.SKILLDMG[game.switch - 1] * game.critical
-        normalized = self.min_max_normalize(raw_value)
+        self.raw_value = game.SKILLDMG[game.switch - 1] * game.critical
+        normalized = self.min_max_normalize(self.raw_value)
         MAX_BULLET_REFERENCE = 100
         bullet_count = len(game.yellow_bullets)
         normalized_bullet_count = math.log(bullet_count + 1) / math.log(MAX_BULLET_REFERENCE + 1)
         state = []
         # 캐릭터의 중심 좌표
-        px = game.yellow.x + game.yellow.width / 2
-        py = game.yellow.y + game.yellow.height / 2
+        px = game.yellow.centerx
+        py = game.yellow.centery
         self.px = px
         self.py = py
 
-        # total 91차원
+        # total 93차원
         # 1. 캐릭터 위치 (총 10차원)
         state.append(px /game.WIDTH)   # 정규화
         state.append(py / game.HEIGHT)
@@ -304,7 +398,7 @@ class MyGameEnv(gym.Env):
                 state.append(plat.width / game.WIDTH)
                 # state.append(plat.height / game.HEIGHT)
 
-        # 7. countdown
+        # 7. countdown 시간제한 3000초 reward시 초기화
         state.append(self.step_count / self.MAXCOUNTDOWN) 
 
         # 몬스터 상태 (40차원)
@@ -314,11 +408,11 @@ class MyGameEnv(gym.Env):
                 my = monster.y + game.MONSTER_HEIGHT / 2
                 dx = (mx - px) / game.WIDTH
                 dy = (my - py) / game.HEIGHT
-                dist = ((dx ** 2 + dy ** 2) ** 0.5) / (2 ** 0.5)
+                mdist = ((dx ** 2 + dy ** 2) ** 0.5) / (2 ** 0.5)
   
                 state.append(mx / game.WIDTH)
                 state.append(my / game.HEIGHT)
-                state.append(dist)
+                state.append(mdist)
                 state.append(1.0 if game.hit else 0.0)
                 state.append(1.0 if game.yellow.colliderect(monster) and game.monswitch[i] else 0.0)
                 state.append((game.monster_directions[i]+1)//2)
@@ -341,6 +435,12 @@ class MyGameEnv(gym.Env):
                 state.append(game.droprd[i] / 5)
             else:
                 state.extend([-1.0,0.0,0.0,0.0])
+        
+        #포탈 상태 (2차원)
+        #포탈 생성 상태
+        state.append(1.0 if game.alldeadsw else 0.0)
+        #포탈 충돌 상태
+        state.append(1.0 if game.yellow.colliderect(game.R_portal) and game.alldeadsw else 0.0)
 
         return np.array(state, dtype=np.float32)
     
@@ -379,11 +479,6 @@ class MyGameEnv(gym.Env):
                 else :
                     game.on_ground = False                       #지면이 아니라고 설정
 
-        for i, irect in enumerate(game.ITEMrect):                #아이템과 충돌
-            if game.yellow.colliderect(irect) and game.dropswitch[i]: #떨어진 아이템 스위치 on 이면서 아이템과 충돌할때
-                game.get_item(i)
-                game.dropswitch[i] = False                       #떨어진 아이템 스위치 OFF
-
     def jump(self):
         if not game.yellow_is_jumping and game.on_ground:                #점프중이 아니고 땅에 서있을때
             if game.clock - game.last_jump_time >= game.JUMP_COOLDOWN:         #점프쿨다운 시간이 지났는지 확인
@@ -396,10 +491,28 @@ class MyGameEnv(gym.Env):
 
  
     def attack(self):
-        game.change_skill_image()
-        game.shoot_bullet()
+        game.change_skill_image()  # 스킬 이미지 변경
+        game.shoot_bullet()        # 총알 방향 설정
+        self.shaping_reward_for_attack()
 
-    # 미니맵을 그리기 위한 함수
+
+    def shaping_reward_for_attack(self):
+        
+        for i, monster in enumerate(game.REDS):
+            if game.monswitch[i]:  # 살아있는 몬스터만
+                dy = abs(monster.centery - game.yellow.centery)
+                # 몬스터가 오른쪽에 있고 플레이어도 오른쪽을 보고 있음
+                if monster.centerx > game.yellow.centerx and dy < 30 and game.LRSWITCH == 'r':
+                    self.last_shaping_reward = 0.001
+                    return
+                # 몬스터가 왼쪽에 있고 플레이어도 왼쪽을 보고 있음
+                elif monster.centerx < game.yellow.centerx and dy < 30 and game.LRSWITCH != 'r':
+                    self.last_shaping_reward = 0.001
+                    return
+
+        # 해당 조건 만족 못한 경우
+        self.last_shaping_reward = 0.0
+        # 미니맵을 그리기 위한 함수
 
     def render(self):
         if self.render_mode:

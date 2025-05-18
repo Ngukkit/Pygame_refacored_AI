@@ -10,14 +10,14 @@ pygame.font.init()
 pygame.mixer.init()
 
 def init_game():
-    global yellow, skill, REDS, SPAWN, BOSS, platforms,WIDTH, HEIGHT
+    global yellow, skill, REDS, SPAWN, BOSS, platforms,WIDTH, HEIGHT,MAIN_CHAR_HEIGHT,MAIN_CHAR_WIDTH
     global SKILLDMG, MYDMG, yellow_health, Maxhealth, player_level, player_xp, xp_to_next_level
     global current_map_index, current_map, chgbg, monch,MONSTER_WIDTH, MONSTER_HEIGHT
     global itemx, itemy, dropswitch, dropitem, ITEM_LEFTIMAGE, ITEMrect, ITEMS, Item_Weights
     global LRSWITCH, critical, ihurt, Money, monmv_time, last_jump_time
-    global yellow_is_jumping, yellow_y_velocity, on_ground, yellow_feet
+    global yellow_is_jumping, yellow_y_velocity, on_ground, yellow_feet,monster_speed
     global GRAVITY, JUMP_POWER, GROUND_Y, BOSSPO,STARTX, STARTY, SKWIDTH,VEL, MON_VEL, BULLET_VEL
-    global monster_healths, MAX_monsterHP, monster_directions,map_names
+    global monster_healths, MAX_monsterHP, monster_directions,map_names,on_platform
     global yellow_bullets, damage_numbers, mydamage_numbers, skill_effects
     global bullet, monswitch, chgbg, alldeadsw, deadcount,monster_platforms,WIN
     global quest_frame_visible, frame_blink_counter,LEVEL_UP_DISPLAY_TIME, LEVEL_UP_DURATION
@@ -85,6 +85,8 @@ def init_game():
     Maxhealth = 300                  #캐릭터 최대체력
     yellow_health = Maxhealth        #캐릭터의 체력
     on_ground = False                #땅인가? 스위치
+    monster_speed = 1                #몬스터의 속도
+    on_platform = [False,False,False,False,False]              #발판인가? 스위치
     player_level = 1                 #캐릭터 레벨 초기변수
     player_xp = 0                    # 레벨업 위한 xp 변수
     xp_to_next_level = 100           # 레벨업을 위해 필요한 xp
@@ -278,7 +280,6 @@ def draw_level_up_message():                                     #레벨업 알�
         text = font.render("LEVEL UP!", True, (255,215,0))
         text_rect = text.get_rect(center=(WIDTH//2,HEIGHT//2))
         WIN.blit(text, text_rect)
-
 
 def draw_quest_frame():                                          # 퀘스트창 그리기 함수
     global frame_blink_counter
@@ -670,7 +671,7 @@ def damage_effect():                                                #몹이 맞�
     SKILL_EFFECT_IMAGE  = pygame.transform.scale(pygame.image.load(Skill_full_path), (180, 180))
 
 def Monster_movement():                                             #몬스터가 움직이는 함수
-    global monster, monmv_time
+    global monster, monmv_time, monster_speed
 
     for i, monster in enumerate(REDS):
         platform_index = monster_platforms[i]                       #플래폼[]중 하나를 변수에 저장
@@ -685,7 +686,8 @@ def Monster_movement():                                             #몬스터�
                 monster_directions[i] *= -1
 
         monster.x += monster_directions[i]* MON_VEL * monch * monrd[i]  #몬스터의 방향에 (몬스터의 속도 X 몬스터의 페이지수 x 몬스터랜덤값)
-
+        monster_speed =  MON_VEL * monch * monrd[i]
+        
         if monster.x <= platform.x:                                         #몬스터가 발판안에 있으면
             monster.x = platform.x                                          #그대로 발판위치를 몬스터의 위치로 넣음
             monster_directions[i] = 1                                       #정방향 
