@@ -35,3 +35,7 @@ When all the monsters on the screen are defeated, a portal appears. Entering the
 Monsters move randomly and become faster over time.
 On stage 9, a boss monster appears.
 Until then, collect items and experience to grow stronger and prepare for the boss battle.
+
+
+v 0.30
+Refined and added states, integrated RewardNet, adjusted reward logic, and fixed bugs."
