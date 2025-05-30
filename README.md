@@ -39,3 +39,12 @@ Until then, collect items and experience to grow stronger and prepare for the bo
 
 v 0.30
 Refined and added states, integrated RewardNet, adjusted reward logic, and fixed bugs."
+
+v 0.50
+Used DualReplayAgent as a solution to handle delayed rewards for character actions.
+Employed a DuelingDQNModel with three hidden layers and two dueling layers, using the SiLU activation function.
+Implemented goal separation for more structured training.
+Introduced RewardNet, also with three hidden layers, to infer delayed or indirect rewards.
+Separated the implementations of the model, agent, and PrioritizedReplayBuffer for modularity and maintainability.
+Utilized a dedicated set of goal_indices for training RewardNet based on state changes. 
+and fixed bugs

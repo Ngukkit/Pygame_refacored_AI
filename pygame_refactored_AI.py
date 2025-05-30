@@ -4,10 +4,11 @@ import random                          #랜덤 필요
 import logging
 import sys
 
-
+# os.environ["SDL_VIDEODRIVER"] = "dummy"  # 그래픽 드라이버를 더미로 지정
 pygame.init()
+# screen = pygame.display.set_mode((1, 1))  # 화면 없이도 내부적으로 렌더링 가능
 pygame.font.init()
-pygame.mixer.init()
+# pygame.mixer.init()
 
 def init_game():
     global yellow, skill, REDS, SPAWN, BOSS, platforms,WIDTH, HEIGHT,MAIN_CHAR_HEIGHT,MAIN_CHAR_WIDTH
@@ -170,7 +171,7 @@ def init_assets():                                                          #외
     global HEALTH_FONT, WINNER_FONT, PORTAL_IMAGE, DROPITEM_IMAGE, UI_BACKGROUND,UI_BACKGROUNDBASE
     global SKILL_EFFECT_IMAGE, MONSTER, PLATFORM_IMAGE, effect_positions,BASE_FONT,quest_font
     global SELF_EFFECT1, SELF_EFFECT2, SELF_EFFECT3, SELF_EFFECT4, SELF_EFFECT5, logging
-
+    
     BASE_FONT = pygame.font.Font("Assets/Maplestory Bold.ttf", 20)           #폰트들
     HEALTH_FONT = pygame.font.Font("Assets/Maplestory Bold.ttf", 40)
     WINNER_FONT = pygame.font.Font("Assets/Maplestory Bold.ttf", 80)
@@ -666,7 +667,7 @@ def change_skill_image():                                           #스킬 변�
 
 def damage_effect():                                                #몹이 맞았을때 나오는 효과 파일 가져오기
     global SKILL_EFFECT_IMAGE 
-    Skill_image_path = f'effect{switch}.png'
+    Skill_image_path = f'Effect{switch}.png'
     Skill_full_path = os.path.join('Assets', Skill_image_path)
     SKILL_EFFECT_IMAGE  = pygame.transform.scale(pygame.image.load(Skill_full_path), (180, 180))
 
