@@ -48,3 +48,10 @@ Introduced RewardNet, also with three hidden layers, to infer delayed or indirec
 Separated the implementations of the model, agent, and PrioritizedReplayBuffer for modularity and maintainability.
 Utilized a dedicated set of goal_indices for training RewardNet based on state changes. 
 and fixed bugs
+
+v 0.55
+"We apply an LSTM-based DQN using a state trajectory buffer.
+Long-term goals are separated and handled with a dedicated Dueling architecture over 8 distinct states.
+For short-term rewards, we use RewardedNet with prioritized experience replay.
+Actions related to long-term goals are selected via the LSTM-based DQN.
+Random actions are taken with a 10% probability."

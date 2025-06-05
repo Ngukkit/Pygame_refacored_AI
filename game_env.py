@@ -143,6 +143,9 @@ class MyGameEnv(gym.Env):
     def handle_action(self, action):
         current_time = time.time()
         delay = self.action_delay_map.get(action, 0.0)  # 기본값 0.0초
+        # print(f"Action: {action}, action_last_time length: {len(self.action_last_time)}")
+        if action < 0 or action >= len(self.action_last_time):
+            raise ValueError(f"Invalid action index: {action}")
 
         if current_time - self.action_last_time[action] < delay:
             return  # 딜레이 미충족 → 무시
@@ -305,10 +308,10 @@ class MyGameEnv(gym.Env):
                     if not game.yellow_is_jumping: 
                     # 위험 조건 모두 만족 & 점프 안했을 때
                         print(f"몹이 위에 NO! jump dx: {abs(dx)},dy: {abs(dy)}, v_threat: {self.v_threat}")
-                        reward += 0.5  # 점프 안해서 위험을 회피함
+                        reward += 0.1  # 점프 안해서 위험을 회피함
                     else:
                         print(f"몹이 위에 jump dx: {abs(dx)},dy: {abs(dy)}, v_threat: {self.v_threat}")
-                        reward -= 0.5
+                        reward -= 0.1
                 
                     self.prev_monster_directions[i] = game.monster_directions[i]
                     
@@ -457,28 +460,28 @@ class MyGameEnv(gym.Env):
                             # game.on_platform[i] = True
             if i != 4:
                 j = i
-                px = plat.centerx - game.yellow.centerx  # x축 거리만 사용
-                py = plat.centery - game.yellow.centery
+                px = abs(plat.centerx - game.yellow.centerx)  # x축 거리만 사용
+                py = abs(plat.centery - game.yellow.centery)
                 pdist = math.sqrt(px ** 2 + py ** 2)
 
                 if self.platform_touched[j+1] and not self.platform_touched[j] and j != 0:
-                    if self.prev_pdist[j] - pdist > 150 and py < 40:
+                    if self.prev_pdist[j] - pdist > 150 and py < 20:
                         reward += 0.4
-                        print(f"come 플랫폼 {j} px:{self.px},Py:{self.py},Pdist:{pdist:.1f},self.prev_dist[i]:{self.prev_pdist[j]:.1f}")
+                        print(f"come 플랫폼 {j} px:{px},Py:{py},Pdist:{pdist:.1f},self.prev_dist[i]:{self.prev_pdist[j]:.1f}")
                         self.prev_pdist[j] = pdist
-                    elif self.prev_pdist[j] - pdist < -150 and py < 40:
+                    elif self.prev_pdist[j] - pdist < -150 and py < 20:
                         reward -= 0.4
-                        print(f"far 플랫폼 {j} px:{self.px},Py:{self.py},Pdist:{pdist:.1f},self.prev_dist[i]:{self.prev_pdist[j]:.1f}")
+                        print(f"far 플랫폼 {j} px:{px},Py:{py},Pdist:{pdist:.1f},self.prev_dist[i]:{self.prev_pdist[j]:.1f}")
                         self.prev_pdist[j] = pdist
                 elif j == 0:
                     j = 4
                     if not self.platform_touched[j] and self.prev_pdist[j] - pdist > 150:
                         reward += 0.4
-                        print(f"come 플랫폼 {j} px:{self.px},Py:{self.py},Pdist:{pdist:.1f},self.prev_dist[j]:{self.prev_pdist[j]:.1f}")
+                        print(f"come 플랫폼 = {j} px:{px},Py:{py},Pdist:{pdist:.1f},self.prev_dist[j]:{self.prev_pdist[j]:.1f}")
                         self.prev_pdist[j] = pdist
                     elif not self.platform_touched[j] and self.prev_pdist[j] - pdist < -150:
                         reward -= 0.4
-                        print(f"far 플랫폼 {j} px:{self.px},Py:{self.py},Pdist:{pdist:.1f},self.prev_dist[j]:{self.prev_pdist[j]:.1f}")
+                        print(f"far 플랫폼 = {j} px:{px},Py:{py},Pdist:{pdist:.1f},self.prev_dist[j]:{self.prev_pdist[j]:.1f}")
                         self.prev_pdist[j] = pdist
                     j = 0
 
@@ -789,11 +792,11 @@ class MyGameEnv(gym.Env):
                 monster = game.REDS[idx]
                 dy = abs(monster.centery - game.yellow.centery)
                 # 오른쪽 몬스터 + 오른쪽 방향
-                if monster.centerx > game.yellow.centerx and dy < 40 and game.LRSWITCH == 'r':
+                if monster.centerx > game.yellow.centerx and dy < 20 and game.LRSWITCH == 'r':
                     self.last_shaping_reward = 0.1
                     return
                 # 왼쪽 몬스터 + 왼쪽 방향
-                elif monster.centerx < game.yellow.centerx and dy < 40 and game.LRSWITCH != 'r':
+                elif monster.centerx < game.yellow.centerx and dy < 20 and game.LRSWITCH != 'r':
                     self.last_shaping_reward = 0.1
                     return
 

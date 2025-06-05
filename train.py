@@ -1,10 +1,13 @@
-from agent_dualreplay import DualReplayAgent
+# from agent_dualreplay import DualReplayAgent
+from agent_dualreplay_lstm import DualReplayAgentLSTM
 # from agent_prioritizedreplay import DQNAgent
 # from agent import DQNAgent
+from collections import deque
 from game_env import MyGameEnv
+from save_utils import initialize_training, log_q_values
 import torch
-# import numpy as np
-# import json
+import random
+import numpy as np
 import os
 import re
 
@@ -41,13 +44,16 @@ action_descriptions = {
     5: "use skill1",  # 예: '5'이면 '스킬4'를 수행
 }
 
+# trajectory 버퍼
+traj_buffer = {k: [] for k in ['states', 'target_onehots', 'actions', 'rewards', 'next_states', 'dones', 'target_ids']}
+
 # device = torch.device("cpu")
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("CUDA 사용 가능?", torch.cuda.is_available())
 if torch.cuda.is_available():
     print("사용 중인 GPU:", torch.cuda.get_device_name(0))
 
-agent = DualReplayAgent(state_size, action_size, goal_indices, target_count=8, device=device)
+agent = DualReplayAgentLSTM(state_size, action_size, goal_indices, target_count=8, device=device,lr =0.0001, traj_len=30)
 
 # 모델을 디바이스로 이동
 agent.model.to(device)
@@ -72,9 +78,10 @@ else:
    
 # 에피소드 수
 episodes = 10000
+# LSTM 입력 시퀀스를 위한 버퍼 (초기화)
+state_seq_buffer = deque(maxlen=agent.traj_len)
+target_seq_buffer = deque(maxlen=agent.traj_len)
 start_epoch = latest_epoch if model_files else 0
-
-
 
 # 상태를 Tensor로 변환하고 디바이스에 맞춰 이동
 state_tensor = torch.tensor(state).unsqueeze(0).float().to(device)
@@ -89,13 +96,26 @@ for e in range(start_epoch,start_epoch + episodes):
     last_reward_step = 0  # 마지막 보상 스텝 초기화
         
     while not done:
-      
-        action = agent.act(state, target_onehot, epsilon=0.1)
+    # 다음 액션을 위해 마지막 액션 시간 갱신
+        state_seq_buffer.append(state)
+        target_seq_buffer.append(target_onehot)
+        
+        # 시퀀스가 최소 길이 이상일 때만 행동 선택
+        if len(state_seq_buffer) >= agent.traj_len:
+            # numpy or torch 텐서로 변환
+            state_seq_np = np.array(state_seq_buffer)  # 리스트 -> ndarray 변환
+            target_seq_np = np.array(target_seq_buffer)  # 리스트 -> ndarray 변환
+            state_seq_tensor = torch.tensor(state_seq_np, dtype=torch.float32).unsqueeze(0).to(device)
+            target_seq_tensor = torch.tensor(target_seq_np, dtype=torch.float32).unsqueeze(0).to(device)
+
+            action = agent.act(state_seq_tensor, target_seq_tensor, epsilon=0.1)
+        else:
+            # 랜덤 액션 또는 idle
+            action = random.randint(0, action_size - 1)
+        # action = agent.act(state, target_onehot, epsilon=0.1)
         action_description = action_descriptions.get(action, "알 수 없는 액션")
 
-    # 다음 액션을 위해 마지막 액션 시간 갱신
         next_state,target_onehot, reward, done, _ = env.step(action)
-        
         # latest_epoch = max(epoch_numbers) if model_files else 0
 
         step_count +=1
@@ -124,23 +144,45 @@ for e in range(start_epoch,start_epoch + episodes):
             # agent.update_schedules()
             last_reward_step = step_count
             
-        total_reward += reward
         
         env.last_reward_timer(step_count-last_reward_step,MAXCOUNTDOWN=1500)  # 보상 타이머 설정
 
+        # step 루프 내부에서:
+        traj_buffer['states'].append(state)
+        traj_buffer['target_onehots'].append(target_onehot)
+        traj_buffer['actions'].append(action)
+        traj_buffer['rewards'].append(reward)
+        traj_buffer['next_states'].append(next_state)
+        traj_buffer['dones'].append(done)
+        traj_buffer['target_ids'].append(env.target_id)
+     
+        # 일정 길이 도달 시 trajectory 저장
+        if len(traj_buffer['states']) >= agent.traj_len:
+            trajectory = {k: v[-agent.traj_len:] for k, v in traj_buffer.items()}
+            trajectory['state_seq'] = list(state_seq_buffer)[-agent.traj_len:]
+            trajectory['target_seq'] = list(target_seq_buffer)[-agent.traj_len:]
+            agent.remember_trajectory(trajectory)
+
+        # 기존 traj_buffer 저장 아래에 추가
+        goal_delta = np.array(next_state)[goal_indices] - np.array(state)[goal_indices]
+        agent.reward_buffer.add((state, action, goal_delta, env.target_id))
+
+        if len(agent.reward_buffer) >= agent.batch_size:
+            agent.train_reward_net()
+
         # 🔹 경험 저장     
-        agent.remember(state, action, reward, next_state, done, env.target_id) 
+        # agent.remember(state, action, reward, next_state, done, env.target_id) 
         
         # 경험 리플레이
         if  step_count % 100 == 0:
-            agent.replay()  
+            # agent.replay()  
+            agent.replay_from_trajectory()
         
         # 🔹 타겟 모델 업데이트
         if step_count % 300 == 0:
             agent.update_target_network()
         
         # 🔹 스케줄 갱신
-
         
         if total_reward < 0:
             print("reward is Zero, episode end")
@@ -148,26 +190,14 @@ for e in range(start_epoch,start_epoch + episodes):
             
         if step_count % 100 == 0:
             # print(f"epsilon:{agent.epsilon:.4f},q_values:{agent.q_valuefordp:.4f},,x{env.px:3.0f},y{env.py:3.0f},tau:{agent.tau:.2f},v_threat:{env.v_threat},Reward:{total_reward:.3f},Action:{action_description}")
-            print(f"q_values:{agent.q_values_view.argmax().item()},x{env.px:3.0f},y{env.py:3.0f},v_threat:{env.v_threat},Reward:{total_reward:.3f},Action:{action_description}")
+            print(f"q_values:{agent.q_values_view.max():.4f},x{env.px:3.0f},y{env.py:3.0f},v_threat:{env.v_threat},Reward:{total_reward:.3f},Action:{action_description}")
         # 죽었을때 모델 저장
-        # if done:
+        if done:
             # agent.epsilon = min(agent.epsilon_max, agent.epsilon * 1.01)  # 또는 1.05 증가도 가능
             # agent.epsilon = min(agent.epsilon_max, 0.5) # 에피소드 종료 시 탐험 증가
-            # target_id를 one-hot 인코딩
-            # target_onehot = torch.nn.functional.one_hot(
-            #     torch.tensor([env.target_id], dtype=torch.long), 
-            #     num_classes=agent.target_count
-            # ).float().to(device)
+            log_q_values(agent, env, state, step_count, device=device)
             
-            # state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
-            
-            # q_log = {
-            #     "step": step_count,
-            #     "q_values": agent.model(state_tensor, target_onehot).detach().cpu().tolist()
-            #     }  # Q 값 로그      
-            # with open("q_values_log.json", "a") as f:
-            #     json.dump(q_log, f)
-            #     f.write("\n")
+        total_reward += reward
                 
         state = next_state        
 
@@ -180,10 +210,12 @@ for e in range(start_epoch,start_epoch + episodes):
     #     agent.save(save_path)
     #     print(f"{save_path} 저장 완료.")
     # elif (e + 1) % 100 == 0 and 0.5 >= agent.epsilon:
-    if (e + 1) % 100 == 0: 
-        save_path = rf"dqn_model{e+1}.pth"
-        agent.save(save_path)
-        print(f"{save_path} 저장 완료.")
+    if (e + 1) % 100 == 0:
+        initialize_training(e, agent, log_filename="q_values_log.json", device=device)
+
+    #     model_filename = f"dqn_model{e+1}.pth"
+    #     agent.save(model_filename)
+    #     print(f"{model_filename} 저장 완료.")
 
     print(f"Episode {e+1}, End Total Reward: {total_reward:.3f}")
 
